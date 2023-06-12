@@ -26,7 +26,7 @@ func main() {
 	if *socksAddress == "" {
 		fmt.Printf("Socks server listening *:%d\n", *socksPort)
 	} else {
-		fmt.Printf("Socks server Listening %s\n", socksServer)
+		fmt.Printf("Socks server listening %s\n", socksServer)
 	}
 	if needAuth {
 		fmt.Printf("Username: %s\nPassword: %s\n", *socksUsername, *socksPassword)
@@ -64,7 +64,7 @@ func process(client net.Conn) {
 		return
 	}
 
-	Socks5Forward(client, target)
+	Socks5Relay(client, target)
 }
 
 func Socks5Auth(client net.Conn) (err error) {
@@ -72,7 +72,7 @@ func Socks5Auth(client net.Conn) (err error) {
 
 	n, err := io.ReadFull(client, buf[:2])
 	if n != 2 {
-		return errors.New("reading header: " + err.Error())
+		return errors.New("read header: " + err.Error())
 	}
 
 	ver, nMethods := int(buf[0]), int(buf[1])
@@ -82,7 +82,7 @@ func Socks5Auth(client net.Conn) (err error) {
 
 	n, err = io.ReadFull(client, buf[:nMethods])
 	if n != nMethods {
-		return errors.New("reading methods: " + err.Error())
+		return errors.New("read methods: " + err.Error())
 	}
 
 	if needAuth {
@@ -92,28 +92,31 @@ func Socks5Auth(client net.Conn) (err error) {
 		}
 		n, err = io.ReadFull(client, buf[:2])
 		if n != 2 {
-			return errors.New("reading auth req: " + err.Error())
+			return errors.New("read auth request: " + err.Error())
 		}
 		ver = int(buf[0])
-		ulen := int(buf[1])
 		if ver != 1 {
 			return errors.New("invalid auth version")
 		}
+
+		ulen := int(buf[1])
 		n, err = io.ReadFull(client, buf[:ulen])
 		if n != ulen {
-			return errors.New("reading username: " + err.Error())
+			return errors.New("read username: " + err.Error())
 		}
 		username := string(buf[:ulen])
+
 		n, err = io.ReadFull(client, buf[:1])
 		if n != 1 {
-			return errors.New("reading password: " + err.Error())
+			return errors.New("read password: " + err.Error())
 		}
 		plen := int(buf[0])
 		n, err = io.ReadFull(client, buf[:plen])
 		if n != plen {
-			return errors.New("reading password: " + err.Error())
+			return errors.New("read password: " + err.Error())
 		}
 		password := string(buf[:plen])
+
 		if username != *socksUsername || password != *socksPassword {
 			return errors.New("invalid username/password: " + username + "/" + password)
 		}
@@ -188,7 +191,7 @@ func Socks5Connect(client net.Conn) (net.Conn, error) {
 	destAddrPort := fmt.Sprintf("%s:%d", addr, port)
 	dest, err := net.Dial("tcp", destAddrPort)
 	if err != nil {
-		return nil, errors.New("dial dst: " + err.Error())
+		return nil, errors.New("dial destination: " + err.Error())
 	}
 	if *enableLog {
 		fmt.Println("Connect: ", destAddrPort)
@@ -203,12 +206,12 @@ func Socks5Connect(client net.Conn) (net.Conn, error) {
 	return dest, nil
 }
 
-func Socks5Forward(client, target net.Conn) {
-	forward := func(src, dest net.Conn) {
-		defer src.Close()
-		defer dest.Close()
-		io.Copy(src, dest)
+func Socks5Relay(client, target net.Conn) {
+	relay := func(source, destination net.Conn) {
+		defer source.Close()
+		defer destination.Close()
+		io.Copy(source, destination)
 	}
-	go forward(client, target)
-	go forward(target, client)
+	go relay(client, target)
+	go relay(target, client)
 }
