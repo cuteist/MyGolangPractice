@@ -21,34 +21,49 @@ func main() {
 }
 
 func getPublicIP(IPver int) (string, error) {
-	stunServer := "stun.cloudflare.com:3478"
 	if IPver != 4 && IPver != 6 {
 		return "", fmt.Errorf("invalid IP version %d, excepted 4 or 6\n", IPver)
 	}
 
+	stunServer := "stun.cloudflare.com:3478"
+
 	rand.Seed(time.Now().UnixNano())
 	conn, err := net.Dial(fmt.Sprintf("udp%d", IPver), stunServer)
 	if err != nil {
-		if strings.HasSuffix(err.Error(), "unreachable") {
+		if strings.HasSuffix(err.Error(), "network is unreachable") {
 			return "", fmt.Errorf("no IPv%d", IPver)
+		}
+		if strings.HasSuffix(err.Error(), "no suitable address found") {
+			return "", fmt.Errorf("the STUN server doesn't support IPv%d", IPver)
 		}
 		return "", err
 	}
+
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(3 * time.Second))
 
-	// STUN message header
-	var messageType uint16 = 0x0001 // Binding Request
-	var messageLength uint16 = 0x0000
-	var magicCookie uint32 = 0x2112A442
+	// https://www.rfc-editor.org/rfc/rfc5389.html#section-6
+	// STUN Message Structure
+	// 	0                   1                   2                   3
+	// 	0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |0 0|     STUN Message Type     |         Message Length        |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |                         Magic Cookie                          |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |                                                               |
+	// |                     Transaction ID (96 bits)                  |
+	// |                                                               |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
+	// STUN message header
+	buf := new(bytes.Buffer)
+	// message type: 0x0001, message length: 0x0000
+	buf.Write([]byte{0x00, 0x01, 0x00, 0x00})
+	magicCookie := []byte{0x21, 0x12, 0xA4, 0x42}
+	buf.Write(magicCookie)
 	transactionID := make([]byte, 12)
 	rand.Read(transactionID)
-
-	buf := new(bytes.Buffer)
-	binary.Write(buf, binary.BigEndian, messageType)
-	binary.Write(buf, binary.BigEndian, messageLength)
-	binary.Write(buf, binary.BigEndian, magicCookie)
 	buf.Write(transactionID)
 
 	_, err = conn.Write(buf.Bytes())
@@ -56,72 +71,86 @@ func getPublicIP(IPver int) (string, error) {
 		return "", err
 	}
 
-	reply := make([]byte, 1024)
-	_, err = conn.Read(reply)
+	response := make([]byte, 1024)
+	n, err := conn.Read(response)
 	if err != nil {
 		return "", err
 	}
+	if n < 32 {
+		return "", fmt.Errorf("invalid response")
+	}
 
 	// Parse STUN message
-	if !bytes.Equal(reply[4:8], buf.Bytes()[4:8]) {
+	if !bytes.Equal(response[4:8], buf.Bytes()[4:8]) {
 		return "", fmt.Errorf("invalid magic cookie in response")
 	}
-	if !bytes.Equal(reply[8:20], buf.Bytes()[8:20]) {
+	if !bytes.Equal(response[8:20], buf.Bytes()[8:20]) {
 		return "", fmt.Errorf("transaction ID mismatch in response")
 	}
 
+	// https://www.rfc-editor.org/rfc/rfc5389.html#section-15
+	// STUN Attributes
+	// 	0                   1                   2                   3
+	// 	0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |         Type                  |            Length             |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |                         Value (variable)                ....
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
 	// Parse STUN attributes
-	attributes := reply[20:]
-	for len(attributes) > 0 {
-		attrType := binary.BigEndian.Uint16(attributes[:2])
-		attrLength := binary.BigEndian.Uint16(attributes[2:4])
-		if attrLength < 8 {
-			return "", fmt.Errorf("invalid address attribute length")
-		}
-		if len(attributes) < 4+int(attrLength) { //TODO: more precise
-			return "", fmt.Errorf("invalid attribute length")
-		}
+	attributes := response[20:]
 
-		attributeValue := attributes[4 : 4+attrLength]
-		family := attributeValue[1]
-
-		if attrType == 0x0001 { // Mapped Address
-			// port := binary.BigEndian.Uint16(attributeValue[2:4])
-			//TODO: reduce code
-			switch family {
-			case 1:
-				ip := net.IP(attributeValue[4:8])
-				return ip.String(), nil
-			case 2:
-				ip := net.IP(attributeValue[4:20])
-				return ip.String(), nil
-			default:
-				return "", fmt.Errorf("unknown address family")
-			}
-		} else if attrType == 0x0020 { // XOR-Mapped Address
-			// port := binary.BigEndian.Uint16(attributeValue[2:4])
-			var ip []byte
-			switch family {
-			case 1:
-				ip = attributeValue[4:8]
-			case 2:
-				ip = attributeValue[4:20]
-				for i := 4; i < len(ip); i++ {
-					ip[i] ^= transactionID[i-4]
-				}
-			default:
-				return "", fmt.Errorf("unknown address family")
-			}
-
-			magicCookieBytes := make([]byte, 4)
-			binary.BigEndian.PutUint32(magicCookieBytes, magicCookie)
-			for i := 0; i < 4; i++ {
-				ip[i] ^= magicCookieBytes[i]
-			}
-
-			return net.IP(ip).String(), nil
-		}
+	attrType := binary.BigEndian.Uint16(attributes[:2])
+	// Mapped Address && Xor-Mapped Address
+	if attrType != 0x0001 && attrType != 0x0020 {
+		return "", fmt.Errorf("invalid address attribute type")
+	}
+	attrLength := binary.BigEndian.Uint16(attributes[2:4])
+	if attrLength < 8 {
+		return "", fmt.Errorf("invalid address attribute length")
 	}
 
-	return "", fmt.Errorf("public IP not found in STUN response")
+	// https://www.rfc-editor.org/rfc/rfc5389.html#section-15.1
+	// MAPPED-ADDRESS
+	// 	0                   1                   2                   3
+	// 	0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |0 0 0 0 0 0 0 0|    Family     |           Port                |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |                                                               |
+	// |                 Address (32 bits or 128 bits)                 |
+	// |                                                               |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// https://www.rfc-editor.org/rfc/rfc5389.html#section-15.2
+	// XOR-MAPPED-ADDRESS
+	// 0                   1                   2                   3
+	// 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |x x x x x x x x|    Family     |         X-Port                |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |                X-Address (Variable)
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	attributeValue := attributes[4 : 4+attrLength]
+	family := attributeValue[1]
+	var ip []byte
+	switch family {
+	case 1:
+		ip = attributeValue[4:8]
+	case 2:
+		ip = attributeValue[4:20]
+	default:
+		return "", fmt.Errorf("unknown address family")
+	}
+	if attrType == 0x0020 { // XOR-Mapped Address
+		for i := 0; i < 4; i++ {
+			ip[i] ^= magicCookie[i]
+		}
+		if family == 2 {
+			for i := 4; i < len(ip); i++ {
+				ip[i] ^= transactionID[i-4]
+			}
+		}
+	}
+	return net.IP(ip).String(), nil
 }
