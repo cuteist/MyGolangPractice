@@ -178,7 +178,7 @@ func Socks5Connect(client net.Conn) (net.Conn, error) {
 		if n != 16 {
 			return nil, errors.New("invalid IPv6: " + err.Error())
 		}
-		addr = fmt.Sprintf("[%s]", net.IP(buf[:16]))
+		addr = fmt.Sprintf("[%s]", net.IP(buf[:16]).String())
 	default:
 		return nil, errors.New("invalid addressType")
 	}
