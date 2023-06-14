@@ -58,7 +58,7 @@ func getPublicIP(IPver int) (string, error) {
 
 	// STUN message header
 	buf := new(bytes.Buffer)
-	// message type: 0x0001, message length: 0x0000
+	// Start with fixed 0x00, message type: 0x01, message length: 0x0000
 	buf.Write([]byte{0x00, 0x01, 0x00, 0x00})
 	magicCookie := []byte{0x21, 0x12, 0xA4, 0x42}
 	buf.Write(magicCookie)
