@@ -160,8 +160,7 @@ func Socks5Connect(client net.Conn) (net.Conn, error) {
 		if n != 4 {
 			return nil, errors.New("invalid IPv4: " + err.Error())
 		}
-		addr = fmt.Sprintf("%d.%d.%d.%d", buf[0], buf[1], buf[2], buf[3])
-
+		addr = net.IP(buf[:4]).String()
 	case 3:
 		n, err = io.ReadFull(client, buf[:1])
 		if n != 1 {
@@ -174,10 +173,12 @@ func Socks5Connect(client net.Conn) (net.Conn, error) {
 			return nil, errors.New("invalid hostname: " + err.Error())
 		}
 		addr = string(buf[:addrLen])
-	// todo ipv6
 	case 4:
-		return nil, errors.New("IPv6: no supported yet")
-
+		n, err = io.ReadFull(client, buf[:16])
+		if n != 16 {
+			return nil, errors.New("invalid IPv6: " + err.Error())
+		}
+		addr = fmt.Sprintf("[%s]", net.IP(buf[:16]))
 	default:
 		return nil, errors.New("invalid addressType")
 	}
@@ -189,12 +190,12 @@ func Socks5Connect(client net.Conn) (net.Conn, error) {
 
 	port := uint(buf[0])<<8 + uint(buf[1])
 	destAddrPort := fmt.Sprintf("%s:%d", addr, port)
+	if *enableLog {
+		fmt.Println("Connect: ", destAddrPort)
+	}
 	dest, err := net.Dial("tcp", destAddrPort)
 	if err != nil {
 		return nil, errors.New("dial destination: " + err.Error())
-	}
-	if *enableLog {
-		fmt.Println("Connect: ", destAddrPort)
 	}
 
 	n, err = client.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
