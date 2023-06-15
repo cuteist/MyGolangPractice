@@ -23,18 +23,28 @@ func main() {
 	needAuth = *socksUsername != "" && *socksPassword != ""
 	socksServer := fmt.Sprintf("%s:%d", *socksAddress, *socksPort)
 	server, err := net.Listen("tcp", socksServer)
-	if *socksAddress == "" {
-		fmt.Printf("Socks server listening *:%d\n", *socksPort)
-	} else {
-		fmt.Printf("Socks server listening %s\n", socksServer)
-	}
-	if needAuth {
-		fmt.Printf("Username: %s\nPassword: %s\n", *socksUsername, *socksPassword)
-	}
-
 	if err != nil {
 		fmt.Printf("Listen failed: %v\n", err)
 		return
+	}
+	authInfo := ""
+	if needAuth {
+		authInfo = fmt.Sprintf("%s:%s@", *socksUsername, *socksPassword)
+	}
+
+	if *socksAddress == "" {
+		ipv4, _ := getPublicIP(4)
+		ipv6, _ := getPublicIP(6)
+		fmt.Printf("Socks server listening *:%d\n", *socksPort)
+		if ipv4 != "" {
+			fmt.Printf("socks5://%s%s:%d\n", authInfo, ipv4, *socksPort)
+		}
+		if ipv6 != "" {
+			fmt.Printf("socks5://%s[%s]:%d\n", authInfo, ipv6, *socksPort)
+		}
+	} else {
+		fmt.Printf("Socks server listening %s\n", socksServer)
+		fmt.Printf("socks5://%s%s\n", authInfo, socksServer)
 	}
 
 	for {
@@ -215,4 +225,26 @@ func Socks5Relay(client, target net.Conn) {
 	}
 	go relay(client, target)
 	go relay(target, client)
+}
+
+func getPublicIP(IPver int) (string, error) {
+	stunServer := "stun.cloudflare.com:3478"
+	conn, err := net.Dial(fmt.Sprintf("udp%d", IPver), stunServer)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	request := []byte{0x00, 0x01, 0x00, 0x00,
+		0x21, 0x12, 0xA4, 0x42,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00}
+	conn.Write(request)
+	response := make([]byte, 44)
+	conn.Read(response)
+	ip := response[28 : 32+(response[25]-1)*12]
+	for i := 0; i < 4; i++ {
+		ip[i] ^= request[4+i]
+	}
+	return net.IP(ip).String(), nil
 }
